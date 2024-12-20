@@ -17,7 +17,7 @@ python main_saclr.py --method saclr-all --no-single_s --alpha 0.125 --rho 0.99 -
 ```
 ##### SimCLR
 ```
-python main_saclr.py --method simclr --temp 0.5 --data_path ~/Datasets/imagenet/ --epochs 100 --batch_size 512 --savedir simclr
+python main_saclr.py --method simclr --temp 0.2 --data_path ~/Datasets/imagenet/ --epochs 100 --batch_size 512 --savedir simclr
 ```
 
 ## Usage evaluation
