@@ -9,7 +9,6 @@ import numpy as np
 import time
 import os
 import json
-import pandas as pd
 from pathlib import Path
 import torchvision
 import urllib
