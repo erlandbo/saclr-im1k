@@ -29,9 +29,9 @@ python evaluate_linear.py --data_path ~/Datasets/imagenet/ --backbone_path logs/
 
 #### finetune evaluation ImageNet
 ```
-python evaluate_finetune.py --data_path ~/Datasets/imagenet/ --backbone_path logs/resnet50_last.pth --train-percent 10 --savedir linear
+python evaluate_finetune.py --data_path ~/Datasets/imagenet/ --backbone_path logs/resnet50_last.pth --train-percent 10 --savedir finetune
 ```
 #### kNN evaluation ImageNet
 ```
-python evaluate_nn.py --data_path ~/Datasets/imagenet/ --backbone_path logs/resnet50_last.pth --savedir linear
+python evaluate_nn.py --data_path ~/Datasets/imagenet/ --backbone_path logs/resnet50_last.pth
 ```
