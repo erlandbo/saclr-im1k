@@ -22,7 +22,7 @@ parser.add_argument('--lr_scale', default="squareroot", type=str, choices=["no_s
 parser.add_argument('--epochs', default=1000, type=int)
 parser.add_argument('--num_workers', default=20, type=int)
 
-parser.add_argument('--method', default="saclr-1", type=str, choices=["saclr-1", "saclr-all", "simclr", "saclr-1-cosine", "saclr-all-cosine"])
+parser.add_argument('--method', default="saclr-1", type=str, choices=["saclr-1", "saclr-all", "simclr"])
 parser.add_argument('--rho', default=0.99, type=float)
 parser.add_argument('--alpha', default=0.125, type=float)
 parser.add_argument('--s_init_t', default=2.0, type=float)
@@ -120,24 +120,6 @@ def main():
         criterion = SimCLR(
             temp=args.temp
         )
-    elif args.method == "saclr-1-cosine":
-        criterion = SACLR1Cosine(
-            N=args.N,
-            rho=args.rho,
-            alpha=args.alpha,
-            s_init=args.s_init,
-            single_s=args.single_s,
-            temp=args.temp
-        )
-    elif args.method == "saclr-all-cosine":
-        criterion = SACLRAllCosine(
-            N=args.N,
-            rho=args.rho,
-            alpha=args.alpha,
-            s_init=args.s_init,
-            single_s=args.single_s,
-            temp=args.temp
-        )
     else:
         raise ValueError("Invalid method criterion", args.method)
     
@@ -174,11 +156,11 @@ def main():
             iter = (epoch - 1) * len(loader) + batch_idx
             adjust_learning_rate(step=iter, len_loader=len(loader), optimizer=optimizer, args=args)
 
-            #x = torch.cat([x1, x2], dim=0)
+            x = torch.cat([x1, x2], dim=0)
 
             with torch.amp.autocast(device_type="cuda", enabled=True):
-                z1, z2 = model(x1, x2)
-                loss = criterion(z1, z2, idx)
+                z = model(x)
+                loss = criterion(z, idx)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -194,7 +176,6 @@ def main():
                     "epoch": epoch-1,
                     "loss": loss.item(),
                     "lr": optimizer.param_groups[0]['lr'],
-                    "Zhat": (criterion.s_inv / criterion.N**2).mean().item() if "saclr" in args.method else 0.0,
                     "time": time.time() - start_time,
                 }
                 with open(Path(args.savedir) / "logs.txt", "a") as f:
@@ -253,11 +234,12 @@ class SACLR1(nn.Module):
         self.s_inv[feats_idx] = (s_inv_a + s_inv_b) / 2.0
 
 
-    def forward(self, feats_a, feats_b, feats_idx):
-        B = feats_a.shape[0]
-        feats_a = F.normalize(feats_a, p=2, dim=1) 
-        feats_b = F.normalize(feats_b, p=2, dim=1) 
+    def forward(self, feats, feats_idx):
+        B = feats.shape[0] // 2
+        feats = F.normalize(feats, p=2, dim=1) 
             
+        feats_a = feats[:B]
+        feats_b = feats[B:]
         
         q_attr_a = torch.exp( -1.0 * F.pairwise_distance(feats_a, feats_b, p=2).pow(2) / (2.0 * self.temp**2.0) )  
         q_attr_b = torch.exp( -1.0 * F.pairwise_distance(feats_b, feats_a, p=2).pow(2) / (2.0 * self.temp**2.0) )  
@@ -320,12 +302,13 @@ class SACLRAll(nn.Module):
         self.s_inv[feats_idx] = (s_inv_a + s_inv_b) / 2.0
 
 
-    def forward(self, feats_a, feats_b, feats_idx):
+    def forward(self, feats, feats_idx):
         LARGE_NUM = 1e9
-        B = feats_a.shape[0]
-        feats_a = F.normalize(feats_a, dim=1, p=2)    
-        feats_b = F.normalize(feats_b, dim=1, p=2)    
+        B = feats.shape[0] // 2
+        feats = F.normalize(feats, dim=1, p=2)    
             
+        feats_a = feats[:B]
+        feats_b = feats[B:]
 
         masks = F.one_hot(torch.arange(B, device=feats_a.device), B)
 
@@ -378,10 +361,12 @@ class SimCLR(nn.Module):
         self.temp = temp
         self.distributed = False
 
-    def forward(self, hidden1, hidden2, idx):
+    def forward(self, hidden, idx):
         LARGE_NUM = 1e9
-        batch_size = hidden1.shape[0]
+        batch_size = hidden.shape[0] // 2
 
+        hidden1 = hidden[0:batch_size]
+        hidden2 = hidden[batch_size:]
         
         hidden1 = F.normalize(hidden1, dim=1, p=2)
         hidden2 = F.normalize(hidden2, dim=1, p=2)
@@ -410,158 +395,6 @@ class SimCLR(nn.Module):
         return loss
 
 
-class SACLR1Cosine(nn.Module):
-    def __init__(self, N, rho, alpha, s_init, single_s, temp):
-        super(SACLR1Cosine, self).__init__()
-        self.register_buffer("s_inv", torch.zeros(1 if single_s else N, ) + 1.0 / s_init)
-        self.register_buffer("N", torch.zeros(1, ) + N)
-        self.register_buffer("rho", torch.zeros(1, ) + rho)
-        self.register_buffer("alpha", torch.zeros(1, ) + alpha)
-        self.single_s = single_s
-        self.temp = temp
-
-    @torch.no_grad()
-    def update_s(self, q_attr_a, q_attr_b, q_rep_a, q_rep_b, feats_idx):
-        B = q_attr_a.size(0)
-
-        E_attr_a = q_attr_a 
-        E_attr_b = q_attr_b 
-
-        E_rep_a = q_rep_a 
-        E_rep_b = q_rep_b 
-
-        if self.single_s:
-            E_attr_a = torch.sum(E_attr_a) / B  
-            E_attr_b = torch.sum(E_attr_b) / B  
-            E_rep_a = torch.sum(E_rep_a) / B  
-            E_rep_b = torch.sum(E_rep_b) / B 
-
-        xi_div_omega_a = self.alpha * E_attr_a + (1.0 - self.alpha) * E_rep_a  
-        xi_div_omega_b = self.alpha * E_attr_b + (1.0 - self.alpha) * E_rep_b  
-
-        s_inv_a = self.rho * self.s_inv[feats_idx] + (1.0 - self.rho) * self.N.pow(2) * xi_div_omega_a  
-        s_inv_b = self.rho * self.s_inv[feats_idx] + (1.0 - self.rho) * self.N.pow(2) * xi_div_omega_b  
-
-        self.s_inv[feats_idx] = (s_inv_a + s_inv_b) / 2.0
-
-
-    def forward(self, feats_a, feats_b, feats_idx):
-        B = feats_a.shape[0]
-        feats_a = F.normalize(feats_a, p=2, dim=1) 
-        feats_b = F.normalize(feats_b, p=2, dim=1) 
-            
-
-        q_attr_a = torch.exp( torch.sum(feats_a * feats_b, dim=1) / self.temp )  
-        q_attr_b = torch.exp( torch.sum(feats_b * feats_a, dim=1) / self.temp )  
-
-        attractive_forces_a = - torch.log(q_attr_a)
-        attractive_forces_b = - torch.log(q_attr_b)
-        
-        neg_idxs = torch.roll(torch.arange(B), shifts=-1, dims=0)
-        q_rep_a = torch.exp( torch.sum(feats_a * feats_b[neg_idxs], dim=1) / self.temp)  
-        q_rep_b = torch.exp( torch.sum(feats_b * feats_a[neg_idxs], dim=1) / self.temp)  
-
-        if self.single_s:
-            feats_idx = 0
-
-        Z_hat = self.s_inv[feats_idx] / self.N.pow(2)
-
-        repulsive_forces_a = q_rep_a / Z_hat
-        repulsive_forces_b = q_rep_b / Z_hat
-
-        loss_a = attractive_forces_a.mean() + repulsive_forces_a.mean()
-        loss_b = attractive_forces_b.mean() + repulsive_forces_b.mean()
-        loss = (loss_a + loss_b) / 2.0
-
-        self.update_s(q_attr_a.detach(), q_attr_b.detach(), q_rep_a.detach(), q_rep_b.detach(), feats_idx)
-
-        return loss
-
-
-class SACLRAllCosine(nn.Module):
-    def __init__(self, N, rho, alpha, s_init, single_s, temp):
-        super(SACLRAllCosine, self).__init__()
-        self.register_buffer("s_inv", torch.zeros(1 if single_s else N, ) + 1.0 / s_init)
-        self.register_buffer("N", torch.zeros(1, ) + N)
-        self.register_buffer("rho", torch.zeros(1, ) + rho)
-        self.register_buffer("alpha", torch.zeros(1, ) + alpha)
-        self.temp = temp
-        self.single_s = single_s
-
-    @torch.no_grad()
-    def update_s(self, q_attr_a, q_attr_b, q_rep_a, q_rep_b, feats_idx):
-        B = q_attr_a.size(0)
-
-        E_attr_a = q_attr_a  
-        E_attr_b = q_attr_b  
-
-        E_rep_a = torch.sum(q_rep_a, dim=1) / (2.0 * B - 2.0)  
-        E_rep_b = torch.sum(q_rep_b, dim=1) / (2.0 * B - 2.0)  
-        if self.single_s:
-            E_attr_a = torch.sum(E_attr_a) / B  
-            E_attr_b = torch.sum(E_attr_b) / B  
-            E_rep_a = torch.sum(E_rep_a) / B  
-            E_rep_b = torch.sum(E_rep_b) / B  
-
-        xi_div_omega_a = self.alpha * E_attr_a + (1.0 - self.alpha) * E_rep_a  
-        xi_div_omega_b = self.alpha * E_attr_b + (1.0 - self.alpha) * E_rep_b  
-
-        s_inv_a = self.rho * self.s_inv[feats_idx] + (1.0 - self.rho) * self.N.pow(2) * xi_div_omega_a 
-        s_inv_b = self.rho * self.s_inv[feats_idx] + (1.0 - self.rho) * self.N.pow(2) * xi_div_omega_b  
-
-        self.s_inv[feats_idx] = (s_inv_a + s_inv_b) / 2.0
-
-
-    def forward(self, feats_a, feats_b, feats_idx):
-        LARGE_NUM = 1e9
-        B = feats_a.shape[0]
-        feats_a = F.normalize(feats_a, dim=1, p=2)    
-        feats_b = F.normalize(feats_b, dim=1, p=2)    
-            
-
-        masks = F.one_hot(torch.arange(B, device=feats_a.device), B)
-
-        logits_aa = torch.matmul(feats_a, feats_a.T)
-        logits_aa = logits_aa - masks * LARGE_NUM
-        logits_bb = torch.matmul(feats_b, feats_b.T)
-        logits_bb = logits_bb - masks * LARGE_NUM
-        logits_ab = torch.matmul(feats_a, feats_b.T)
-        logits_ba = torch.matmul(feats_b, feats_a.T)
-
-        logits_pos_a = torch.diag(logits_ab)
-        logits_pos_b = torch.diag(logits_ba)
-
-        logits_ab = logits_ab - masks * LARGE_NUM
-        logits_ba = logits_ba - masks * LARGE_NUM
-
-        logits_a = torch.cat([logits_ab, logits_aa], dim=1)
-        logits_b = torch.cat([logits_ba, logits_bb], dim=1)
-        
-        q_attr_a = torch.exp(logits_pos_a / self.temp)
-        q_attr_b = torch.exp(logits_pos_b / self.temp)  
-
-        attractive_forces_a = - torch.log(q_attr_a)
-        attractive_forces_b = - torch.log(q_attr_b)
-
-        q_rep_a = torch.exp(logits_a / self.temp) 
-        q_rep_b = torch.exp(logits_b / self.temp) 
-
-        if self.single_s:
-            feats_idx = 0
-
-        Z_hat = ( self.s_inv[feats_idx] / self.N.pow(2) ) * ( 2 * B - 2) 
-
-        repulsive_forces_a = torch.sum(q_rep_a / Z_hat.detach().view(-1,1), dim=1) 
-        repulsive_forces_b = torch.sum(q_rep_b / Z_hat.detach().view(-1,1), dim=1) 
-
-        loss_a = attractive_forces_a.mean() + repulsive_forces_a.mean()
-        loss_b = attractive_forces_b.mean() + repulsive_forces_b.mean()
-        loss = (loss_a + loss_b) / 2.0
-
-        self.update_s(q_attr_a.detach(), q_attr_b.detach(), q_rep_a.detach(), q_rep_b.detach(), feats_idx)
-
-        return loss
-
 
 class ImageNetIndex(torch.utils.data.Dataset):
     def __init__(self, root, transform):
@@ -589,10 +422,9 @@ class SimCLRNet(nn.Module):
             nn.Linear(8192, 8192, bias=True)
         )
 
-    def forward(self, x1, x2):
-        z1 = self.projector(self.backbone(x1))
-        z2 = self.projector(self.backbone(x2))
-        return z1, z2
+    def forward(self, x):
+        return self.projector(self.backbone(x))
+
 
 
 
