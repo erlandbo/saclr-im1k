@@ -199,11 +199,11 @@ def main_worker(gpu, args):
             iter = (epoch - 1) * len(loader) + batch_idx
             adjust_learning_rate(step=iter, len_loader=len(loader), optimizer=optimizer, args=args)
 
-            x = torch.cat([x1, x2], dim=0)
 
             with torch.amp.autocast(device_type="cuda", enabled=True):
-                z = model(x)
-                loss = criterion(z, idx)
+                z1 = model(x1)
+                z2 = model(x2)
+                loss = criterion(z1, z2, idx)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -219,6 +219,7 @@ def main_worker(gpu, args):
                     "epoch": epoch-1,
                     "loss": loss.item(),
                     "lr": optimizer.param_groups[0]['lr'],
+                    "Zhat": criterion.s_inv.mean() / criterion.N**2 if "saclr" in args.method else 0.0,
                     "time": time.time() - start_time,
                 }
                 with open(Path(args.savedir) / "logs.txt", "a") as f:
@@ -289,13 +290,11 @@ class SACLR1(nn.Module):
         self.s_inv[feats_idx] = (s_inv_a + s_inv_b) / 2.0
 
 
-    def forward(self, feats, feats_idx):
-        B = feats.shape[0] // 2
-        feats = F.normalize(feats, p=2, dim=1) 
+    def forward(self, feats_a, feats_b, feats_idx):
+        B = feats_a.shape[0]
+        feats_a = F.normalize(feats_a, p=2, dim=1) 
+        feats_b = F.normalize(feats_b, p=2, dim=1) 
             
-        feats_a = feats[:B]
-        feats_b = feats[B:]
-        
         q_attr_a = torch.exp( -1.0 * F.pairwise_distance(feats_a, feats_b, p=2).pow(2) / (2.0 * self.temp**2.0) )  
         q_attr_b = torch.exp( -1.0 * F.pairwise_distance(feats_b, feats_a, p=2).pow(2) / (2.0 * self.temp**2.0) )  
         attractive_forces_a = - torch.log(q_attr_a)
@@ -369,14 +368,13 @@ class SACLRAll(nn.Module):
         self.s_inv[feats_idx] = (s_inv_a + s_inv_b) / 2.0
 
 
-    def forward(self, feats, feats_idx):
+    def forward(self, feats_a, feats_b, feats_idx):
         LARGE_NUM = 1e9
-        B = feats.shape[0] // 2
-        feats = F.normalize(feats, dim=1, p=2)    
-            
-        feats_a = feats[:B]
-        feats_b = feats[B:]
+        B = feats_a.shape[0]
 
+        feats_a = F.normalize(feats_a, dim=1, p=2)    
+        feats_b = F.normalize(feats_b, dim=1, p=2)    
+            
         feats_a_large = torch.cat(all_gather_layer.apply(feats_a), 0)
         feats_b_large = torch.cat(all_gather_layer.apply(feats_b), 0)
         enlarged_B = feats_a_large.shape[0]
@@ -395,13 +393,11 @@ class SACLRAll(nn.Module):
 
         logits_pos_a = logits_ab[masks.bool()]
         logits_pos_b = logits_ba[masks.bool()]
-        #print(masks.bool())
-        #print(logits_ab[masks.bool()])
+                
 
         logits_ab = logits_ab - masks * LARGE_NUM
         logits_ba = logits_ba - masks * LARGE_NUM
 
-        #print(logits_ab[masks.bool()])
 
         logits_a = torch.cat([logits_ab, logits_aa], dim=1)
         logits_b = torch.cat([logits_ba, logits_bb], dim=1)
@@ -439,13 +435,10 @@ class SimCLR(nn.Module):
         self.temp = temp
         self.distributed = False
 
-    def forward(self, hidden, idx):
+    def forward(self, hidden1, hidden2, idx):
         LARGE_NUM = 1e9
-        batch_size = hidden.shape[0] // 2
+        batch_size = hidden1.shape[0]
 
-        hidden1 = hidden[0:batch_size]
-        hidden2 = hidden[batch_size:]
-        
         hidden1 = F.normalize(hidden1, dim=1, p=2)
         hidden2 = F.normalize(hidden2, dim=1, p=2)
         
@@ -466,8 +459,7 @@ class SimCLR(nn.Module):
         logits_bb = logits_bb - masks * LARGE_NUM
         logits_ab = torch.matmul(hidden1, hidden2_large.T) / self.temp
         logits_ba = torch.matmul(hidden2, hidden1_large.T) / self.temp
-        #print(logits_ab.shape, labels.shape)
-        #print(labels)
+        
         loss_a = F.cross_entropy(torch.cat([logits_ab, logits_aa], dim=1), labels.float())
         loss_b = F.cross_entropy(torch.cat([logits_ba, logits_bb], dim=1), labels.float())
         loss = (loss_a + loss_b) / 2.0
@@ -521,13 +513,11 @@ class SACLR1Cosine(nn.Module):
         self.s_inv[feats_idx] = (s_inv_a + s_inv_b) / 2.0
 
 
-    def forward(self, feats, feats_idx):
-        B = feats.shape[0] // 2
-        feats = F.normalize(feats, p=2, dim=1) 
+    def forward(self, feats_a, feats_b, feats_idx):
+        B = feats_a.shape[0]
+        feats_a = F.normalize(feats_a, p=2, dim=1) 
+        feats_b = F.normalize(feats_b, p=2, dim=1) 
             
-        feats_a = feats[:B]
-        feats_b = feats[B:]
-
         q_attr_a = torch.exp( torch.sum(feats_a * feats_b, dim=1) / self.temp )  
         q_attr_b = torch.exp( torch.sum(feats_b * feats_a, dim=1) / self.temp )  
 
@@ -601,14 +591,13 @@ class SACLRAllCosine(nn.Module):
         self.s_inv[feats_idx] = (s_inv_a + s_inv_b) / 2.0
 
 
-    def forward(self, feats, feats_idx):
+    def forward(self, feats_a, feats_b, feats_idx):
         LARGE_NUM = 1e9
-        B = feats.shape[0] // 2
-        feats = F.normalize(feats, dim=1, p=2)    
+        B = feats_a.shape[0]
+        
+        feats_a = F.normalize(feats_a, dim=1, p=2)    
+        feats_b = F.normalize(feats_b, dim=1, p=2)    
             
-        feats_a = feats[:B]
-        feats_b = feats[B:]
-
         feats_a_large = torch.cat(all_gather_layer.apply(feats_a), 0)
         feats_b_large = torch.cat(all_gather_layer.apply(feats_b), 0)
         enlarged_B = feats_a_large.shape[0]
