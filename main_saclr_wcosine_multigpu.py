@@ -277,8 +277,10 @@ class SACLR1(nn.Module):
         
         if self.single_s:
             feats_idx = 0
-            s_inv_a = dist.all_reduce(s_inv_a) / self.world_size
-            s_inv_b = dist.all_reduce(s_inv_b) / self.world_size
+            dist.all_reduce(s_inv_a)
+            dist.all_reduce(s_inv_b)
+            s_inv_a = s_inv_a / torch.distributed.get_world_size()
+            s_inv_b = s_inv_b / torch.distributed.get_world_size()
         else:
             feats_idx = concat_all_gather(feats_idx)
             s_inv_a = concat_all_gather(s_inv_a)
@@ -355,8 +357,10 @@ class SACLRAll(nn.Module):
 
         if self.single_s:
             feats_idx = 0
-            s_inv_a = dist.all_reduce(s_inv_a) / torch.distributed.get_world_size()
-            s_inv_b = dist.all_reduce(s_inv_b) / torch.distributed.get_world_size()
+            dist.all_reduce(s_inv_a)
+            dist.all_reduce(s_inv_b)
+            s_inv_a = s_inv_a / torch.distributed.get_world_size()
+            s_inv_b = s_inv_b / torch.distributed.get_world_size()
         else:
             feats_idx = concat_all_gather(feats_idx)
             s_inv_a = concat_all_gather(s_inv_a)
@@ -505,8 +509,10 @@ class SACLR1Cosine(nn.Module):
 
         if self.single_s:
             feats_idx = 0
-            s_inv_a = dist.all_reduce(s_inv_a) / torch.distributed.get_world_size()
-            s_inv_b = dist.all_reduce(s_inv_b) / torch.distributed.get_world_size()
+            dist.all_reduce(s_inv_a)
+            dist.all_reduce(s_inv_b)
+            s_inv_a = s_inv_a / torch.distributed.get_world_size()
+            s_inv_b = s_inv_b / torch.distributed.get_world_size()
         else:
             feats_idx = concat_all_gather(feats_idx)
             s_inv_a = concat_all_gather(s_inv_a)
@@ -583,8 +589,10 @@ class SACLRAllCosine(nn.Module):
 
         if self.single_s:
             feats_idx = 0
-            s_inv_a = dist.all_reduce(s_inv_a) / torch.distributed.get_world_size()
-            s_inv_b = dist.all_reduce(s_inv_b) / torch.distributed.get_world_size()
+            dist.all_reduce(s_inv_a)
+            dist.all_reduce(s_inv_b)
+            s_inv_a = s_inv_a / torch.distributed.get_world_size()
+            s_inv_b = s_inv_b / torch.distributed.get_world_size()
         else:
             feats_idx = concat_all_gather(feats_idx)
             s_inv_a = concat_all_gather(s_inv_a)
