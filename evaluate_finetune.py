@@ -37,11 +37,6 @@ parser.add_argument('--print_freq', default=100, type=int)
 
 def main_finetune():
     args = parser.parse_args()
-    # semi-supervised split from SimCLIR
-    # https://arxiv.org/pdf/2002.05709
-    # https://arxiv.org/pdf/2103.03230 https://github.com/facebookresearch/barlowtwins/blob/main/evaluate.py
-    if args.train_percent in {1, 10}: 
-        args.train_files = urllib.request.urlopen(f'https://raw.githubusercontent.com/google-research/simclr/master/imagenet_subsets/{args.train_percent}percent.txt').readlines()
 
     os.makedirs(args.savedir, exist_ok=True)
 
@@ -49,6 +44,15 @@ def main_finetune():
         f.write(json.dumps(args.__dict__)+ "\n")
 
     print("args", args)
+
+
+    # semi-supervised split from SimCLIR
+    # https://arxiv.org/pdf/2002.05709
+    # https://arxiv.org/pdf/2103.03230 https://github.com/facebookresearch/barlowtwins/blob/main/evaluate.py
+    if args.train_percent in {1, 10}: 
+        args.train_files = urllib.request.urlopen(f'https://raw.githubusercontent.com/google-research/simclr/master/imagenet_subsets/{args.train_percent}percent.txt').readlines()
+
+
 
     if args.random_state is not None:
         torch.manual_seed(args.random_state)
