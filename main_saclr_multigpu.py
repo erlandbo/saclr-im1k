@@ -4,7 +4,7 @@ import time
 import os
 import torch.distributed
 import torchvision
-from torch import nn
+from torch import nn, optim
 from torch.nn import functional as F
 import math
 import numpy as np
@@ -42,21 +42,6 @@ parser.add_argument('--savedir', type=str, default='logs/')
 parser.add_argument('--checkpoint_interval', default=1000, type=int)
 parser.add_argument('--print_freq', default=100, type=int)
 parser.add_argument('--random_state', default=None, type=int)
-
-
-def adjust_learning_rate(step, len_loader, optimizer, args):
-    tot_steps = args.epochs * len_loader
-    warmup_steps = 10 * len_loader
-    init_lr = args.lr
-    if step < warmup_steps:
-        lr = init_lr * step / warmup_steps
-    else:
-        step -= warmup_steps
-        tot_steps -= warmup_steps
-        min_lr = init_lr * 0.001
-        lr = min_lr + 0.5 * (init_lr - min_lr ) * (1 + math.cos(math.pi * step / tot_steps))
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
 
 
 def main():
@@ -193,7 +178,11 @@ def main_worker(gpu, args):
     
     criterion.cuda()
 
-    optimizer = LARS(model.parameters(), lr=0.0, weight_decay=args.weight_decay, momentum=0.9)
+    #optimizer = LARS(model.parameters(), lr=0.0, weight_decay=args.weight_decay, momentum=0.9)
+    optimizer = LARS(model.parameters(), lr=0, weight_decay=args.weight_decay,
+                     weight_decay_filter=True,
+                     lars_adaptation_filter=True)
+
     
     torch.backends.cudnn.benchmark = True
 
@@ -943,11 +932,34 @@ class SimCLRNet(nn.Module):
 # https://github.com/facebookresearch/barlowtwins/blob/main/main.py
 
 
-class LARS(torch.optim.Optimizer):
-    def __init__(self, params, lr, weight_decay=0, momentum=0.9, eta=0.001):
-        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum, eta=eta)
+def adjust_learning_rate(step, len_loader, optimizer, args):
+    max_steps = args.epochs * len_loader
+    warmup_steps = 10 * len_loader
+    base_lr = args.lr # args.batch_size / 256
+    if step < warmup_steps:
+        lr = base_lr * step / warmup_steps
+    else:
+        step -= warmup_steps
+        max_steps -= warmup_steps
+        q = 0.5 * (1 + math.cos(math.pi * step / max_steps))
+        end_lr = base_lr * 0.001
+        lr = base_lr * q + end_lr * (1 - q)
+    optimizer.param_groups[0]['lr'] = lr 
+    #optimizer.param_groups[1]['lr'] = lr
+
+
+
+class LARS(optim.Optimizer):
+    def __init__(self, params, lr, weight_decay=0, momentum=0.9, eta=0.001,
+                 weight_decay_filter=False, lars_adaptation_filter=False):
+        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum,
+                        eta=eta, weight_decay_filter=weight_decay_filter,
+                        lars_adaptation_filter=lars_adaptation_filter)
         super().__init__(params, defaults)
 
+
+    def exclude_bias_and_norm(self, p):
+        return p.ndim == 1
 
     @torch.no_grad()
     def step(self):
@@ -958,9 +970,10 @@ class LARS(torch.optim.Optimizer):
                 if dp is None:
                     continue
 
-                if p.ndim != 1:
+                if not g['weight_decay_filter'] or not self.exclude_bias_and_norm(p):
                     dp = dp.add(p, alpha=g['weight_decay'])
-                
+
+                if not g['lars_adaptation_filter'] or not self.exclude_bias_and_norm(p):
                     param_norm = torch.norm(p)
                     update_norm = torch.norm(dp)
                     one = torch.ones_like(param_norm)
