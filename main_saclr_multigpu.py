@@ -28,12 +28,13 @@ parser.add_argument('--lr_scale', default="squareroot", type=str, choices=["no_s
 parser.add_argument('--epochs', default=1000, type=int)
 parser.add_argument('--num_workers', default=20, type=int)
 
-parser.add_argument('--method', default="saclr-1", type=str, choices=["saclr-1", "saclr-all", "simclr", "saclr-1-cosine", "saclr-all-cosine"])
+parser.add_argument('--method', default="saclr-1", type=str, choices=["saclr-1", "saclr-all", "simclr", "saclr-1-cosine", "saclr-all-cosine", "saclr-all-batchmix-cosine", "saclr-all-batchmix"])
 parser.add_argument('--rho', default=0.99, type=float)
 parser.add_argument('--alpha', default=0.125, type=float)
 parser.add_argument('--s_init_t', default=2.0, type=float)
 parser.add_argument('--single_s', default=False, action=argparse.BooleanOptionalAction)
 parser.add_argument('--temp', default=0.5, type=float)
+parser.add_argument('--bmix_rate', default=0.5, type=float)
 
 parser.add_argument('--data_path', default="~/Datasets/imagenet/", type=str)
 
@@ -166,6 +167,26 @@ def main_worker(gpu, args):
             s_init=args.s_init,
             single_s=args.single_s,
             temp=args.temp
+        )
+    elif args.method == "saclr-all-batchmix-cosine":
+        criterion = SACLRAllBatchMixCosine(
+            N=args.N,
+            rho=args.rho,
+            alpha=args.alpha,
+            s_init=args.s_init,
+            single_s=args.single_s,
+            temp=args.temp,
+            bmix_rate=args.bmix_rate
+        )
+    elif args.method == "saclr-all-batchmix":
+        criterion = SACLRAllBatchMix(
+            N=args.N,
+            rho=args.rho,
+            alpha=args.alpha,
+            s_init=args.s_init,
+            single_s=args.single_s,
+            temp=args.temp,
+            bmix_rate=args.bmix_rate
         )
     else:
         raise ValueError("Invalid method criterion", args.method)
@@ -431,6 +452,119 @@ class SACLRAll(nn.Module):
         return loss
 
 
+class SACLRAllBatchMix(nn.Module):
+    def __init__(self, N, rho, alpha, s_init, single_s, temp, bmix_rate):
+        super(SACLRAllBatchMix, self).__init__()
+        self.register_buffer("s_inv", torch.zeros(1 if single_s else N, ) + 1.0 / s_init)
+        self.register_buffer("N", torch.zeros(1, ) + N)
+        self.register_buffer("rho", torch.zeros(1, ) + rho)
+        self.register_buffer("alpha", torch.zeros(1, ) + alpha)
+        self.temp = temp
+        self.single_s = single_s
+        self.bmix_rate = bmix_rate
+
+    @torch.no_grad()
+    def update_s(self, q_attr_a, q_attr_b, q_rep_a, q_rep_b, feats_idx):
+        B = q_attr_a.size(0)
+        enlarged_B = q_rep_a.size(1)
+
+        E_attr_a = q_attr_a  
+        E_attr_b = q_attr_b  
+
+        E_rep_a = torch.sum(q_rep_a, dim=1) / (2.0 * enlarged_B - 2.0)  
+        E_rep_b = torch.sum(q_rep_b, dim=1) / (2.0 * enlarged_B - 2.0)  
+        if self.single_s:
+            E_attr_a = torch.sum(E_attr_a) / B  
+            E_attr_b = torch.sum(E_attr_b) / B  
+            E_rep_a = torch.sum(E_rep_a) / B  
+            E_rep_b = torch.sum(E_rep_b) / B  
+
+        xi_div_omega_a = self.alpha * E_attr_a + (1.0 - self.alpha) * E_rep_a  
+        xi_div_omega_b = self.alpha * E_attr_b + (1.0 - self.alpha) * E_rep_b  
+
+        s_inv_a = self.rho * self.s_inv[feats_idx] + (1.0 - self.rho) * self.N.pow(2) * xi_div_omega_a 
+        s_inv_b = self.rho * self.s_inv[feats_idx] + (1.0 - self.rho) * self.N.pow(2) * xi_div_omega_b  
+
+        if self.single_s:
+            feats_idx = 0
+            dist.all_reduce(s_inv_a)
+            dist.all_reduce(s_inv_b)
+            s_inv_a = s_inv_a / torch.distributed.get_world_size()
+            s_inv_b = s_inv_b / torch.distributed.get_world_size()
+        else:
+            feats_idx = concat_all_gather(feats_idx)
+            s_inv_a = concat_all_gather(s_inv_a)
+            s_inv_b = concat_all_gather(s_inv_b)
+
+        self.s_inv[feats_idx] = (s_inv_a + s_inv_b) / 2.0
+
+
+    def forward(self, feats_a, feats_b, feats_idx):
+        LARGE_NUM = 1e9
+        B = feats_a.shape[0]
+        feats_a = F.normalize(feats_a, dim=1, p=2)    
+        feats_b = F.normalize(feats_b, dim=1, p=2)    
+            
+
+        feats_a_large = torch.cat(all_gather_layer.apply(feats_a), 0)
+        feats_b_large = torch.cat(all_gather_layer.apply(feats_b), 0)
+        enlarged_B = feats_a_large.shape[0]
+
+        replica_id = torch.distributed.get_rank()
+        labels_idx = torch.arange(B, device=feats_a.device) + B * replica_id
+
+        masks = F.one_hot(labels_idx, enlarged_B)
+
+        logits_aa = -1.0 * torch.cdist(feats_a, feats_a_large, p=2).pow(2) / (2.0 * self.temp **2.0)
+        logits_aa = logits_aa - masks * LARGE_NUM
+        logits_bb = -1.0 * torch.cdist(feats_b, feats_b_large, p=2).pow(2) / (2.0 * self.temp **2.0)
+        logits_bb = logits_bb - masks * LARGE_NUM
+        logits_ab = -1.0 * torch.cdist(feats_a, feats_b_large, p=2).pow(2) / (2.0 * self.temp **2.0)
+        logits_ba = -1.0 * torch.cdist(feats_b, feats_a_large, p=2).pow(2) / (2.0 * self.temp **2.0)
+
+        logits_pos_a = logits_ab[masks.bool()]
+        logits_pos_b = logits_ba[masks.bool()]
+        #print(masks.bool())
+        #print(logits_ab[masks.bool()])
+
+        logits_ab = logits_ab - masks * LARGE_NUM
+        logits_ba = logits_ba - masks * LARGE_NUM
+
+        #print(logits_ab[masks.bool()])
+
+        logits_a = torch.cat([logits_ab, logits_aa], dim=1)
+        logits_b = torch.cat([logits_ba, logits_bb], dim=1)
+        
+        q_attr_a = torch.exp(logits_pos_a)  # (B,)
+        q_attr_b = torch.exp(logits_pos_b)  # (B,)
+
+        attractive_forces_a = - torch.log(q_attr_a)
+        attractive_forces_b = - torch.log(q_attr_b)
+
+        q_rep_a = torch.exp(logits_a)  # (B,2*B_enlarged)
+        q_rep_b = torch.exp(logits_b)  # (B,2*B_enlarged)
+
+        if self.single_s:
+            feats_idx = 0
+
+        Z_hat = ( self.s_inv[feats_idx] / self.N.pow(2) ) * ( 2 * enlarged_B - 2)
+        Z_hat_a = self.bmix_rate * Z_hat + (1-self.bmix_rate) * torch.sum(q_rep_a.detach(), dim=1) 
+        Z_hat_b = self.bmix_rate * Z_hat + (1-self.bmix_rate) * torch.sum(q_rep_b.detach(), dim=1) 
+ 
+        repulsive_forces_a = torch.sum(q_rep_a / Z_hat_a.detach().view(-1,1), dim=1) 
+        repulsive_forces_b = torch.sum(q_rep_b / Z_hat_b.detach().view(-1,1), dim=1) 
+
+        loss_a = attractive_forces_a.mean() + repulsive_forces_a.mean()
+        loss_b = attractive_forces_b.mean() + repulsive_forces_b.mean()
+        loss = (loss_a + loss_b) / 2.0
+
+        self.update_s(q_attr_a.detach(), q_attr_b.detach(), q_rep_a.detach(), q_rep_b.detach(), feats_idx)
+
+        return loss
+
+
+
+
 class SimCLR(nn.Module):
     def __init__(self, temp):
         super().__init__()
@@ -653,6 +787,115 @@ class SACLRAllCosine(nn.Module):
         self.update_s(q_attr_a.detach(), q_attr_b.detach(), q_rep_a.detach(), q_rep_b.detach(), feats_idx)
 
         return loss
+
+
+
+class SACLRAllBatchMixCosine(nn.Module):
+    def __init__(self, N, rho, alpha, s_init, single_s, temp, bmix_rate):
+        super(SACLRAllBatchMixCosine, self).__init__()
+        self.register_buffer("s_inv", torch.zeros(1 if single_s else N, ) + 1.0 / s_init)
+        self.register_buffer("N", torch.zeros(1, ) + N)
+        self.register_buffer("rho", torch.zeros(1, ) + rho)
+        self.register_buffer("alpha", torch.zeros(1, ) + alpha)
+        self.temp = temp
+        self.single_s = single_s
+        self.bmix_rate = bmix_rate
+
+    @torch.no_grad()
+    def update_s(self, q_attr_a, q_attr_b, q_rep_a, q_rep_b, feats_idx):
+        B = q_attr_a.size(0)
+        enlarged_B = q_rep_a.size(1)
+
+        E_attr_a = q_attr_a  
+        E_attr_b = q_attr_b  
+
+        E_rep_a = torch.sum(q_rep_a, dim=1) / (2.0 * enlarged_B - 2.0)  
+        E_rep_b = torch.sum(q_rep_b, dim=1) / (2.0 * enlarged_B - 2.0)  
+        if self.single_s:
+            E_attr_a = torch.sum(E_attr_a) / B  
+            E_attr_b = torch.sum(E_attr_b) / B  
+            E_rep_a = torch.sum(E_rep_a) / B  
+            E_rep_b = torch.sum(E_rep_b) / B  
+
+        xi_div_omega_a = self.alpha * E_attr_a + (1.0 - self.alpha) * E_rep_a  
+        xi_div_omega_b = self.alpha * E_attr_b + (1.0 - self.alpha) * E_rep_b  
+
+        s_inv_a = self.rho * self.s_inv[feats_idx] + (1.0 - self.rho) * self.N.pow(2) * xi_div_omega_a 
+        s_inv_b = self.rho * self.s_inv[feats_idx] + (1.0 - self.rho) * self.N.pow(2) * xi_div_omega_b  
+
+        if self.single_s:
+            feats_idx = 0
+            dist.all_reduce(s_inv_a)
+            dist.all_reduce(s_inv_b)
+            s_inv_a = s_inv_a / torch.distributed.get_world_size()
+            s_inv_b = s_inv_b / torch.distributed.get_world_size()
+        else:
+            feats_idx = concat_all_gather(feats_idx)
+            s_inv_a = concat_all_gather(s_inv_a)
+            s_inv_b = concat_all_gather(s_inv_b)
+
+        self.s_inv[feats_idx] = (s_inv_a + s_inv_b) / 2.0
+
+
+    def forward(self, feats_a, feats_b, feats_idx):
+        LARGE_NUM = 1e9
+        B = feats_a.shape[0]
+        feats_a = F.normalize(feats_a, dim=1, p=2)    
+        feats_b = F.normalize(feats_b, dim=1, p=2)    
+            
+
+        feats_a_large = torch.cat(all_gather_layer.apply(feats_a), 0)
+        feats_b_large = torch.cat(all_gather_layer.apply(feats_b), 0)
+        enlarged_B = feats_a_large.shape[0]
+
+        replica_id = torch.distributed.get_rank()
+        labels_idx = torch.arange(B, device=feats_a.device) + B * replica_id
+
+        masks = F.one_hot(labels_idx, enlarged_B)
+
+        logits_aa = torch.matmul(feats_a, feats_a_large.T)
+        logits_aa = logits_aa - masks * LARGE_NUM
+        logits_bb = torch.matmul(feats_b, feats_b_large.T)
+        logits_bb = logits_bb - masks * LARGE_NUM
+        logits_ab = torch.matmul(feats_a, feats_b_large.T)
+        logits_ba = torch.matmul(feats_b, feats_a_large.T)
+
+        logits_pos_a = logits_ab[masks.bool()]
+        logits_pos_b = logits_ba[masks.bool()]
+
+        logits_ab = logits_ab - masks * LARGE_NUM
+        logits_ba = logits_ba - masks * LARGE_NUM
+
+        logits_a = torch.cat([logits_ab, logits_aa], dim=1)
+        logits_b = torch.cat([logits_ba, logits_bb], dim=1)
+        
+        q_attr_a = torch.exp(logits_pos_a / self.temp)  # (B,)
+        q_attr_b = torch.exp(logits_pos_b / self.temp)  # (B,)
+
+        attractive_forces_a = - torch.log(q_attr_a)
+        attractive_forces_b = - torch.log(q_attr_b)
+
+        q_rep_a = torch.exp(logits_a / self.temp)  # (B,2*B_enlarged)
+        q_rep_b = torch.exp(logits_b / self.temp)  # (B,2*B_enlarged)
+
+        if self.single_s:
+            feats_idx = 0
+
+        Z_hat = ( self.s_inv[feats_idx] / self.N.pow(2) ) * ( 2 * enlarged_B - 2)
+        Z_hat_a = self.bmix_rate * Z_hat + (1-self.bmix_rate) * torch.sum(q_rep_a.detach(), dim=1) 
+        Z_hat_b = self.bmix_rate * Z_hat + (1-self.bmix_rate) * torch.sum(q_rep_b.detach(), dim=1) 
+
+        repulsive_forces_a = torch.sum(q_rep_a / Z_hat_a.detach().view(-1,1), dim=1) 
+        repulsive_forces_b = torch.sum(q_rep_b / Z_hat_b.detach().view(-1,1), dim=1) 
+
+        loss_a = attractive_forces_a.mean() + repulsive_forces_a.mean()
+        loss_b = attractive_forces_b.mean() + repulsive_forces_b.mean()
+        loss = (loss_a + loss_b) / 2.0
+
+        self.update_s(q_attr_a.detach(), q_attr_b.detach(), q_rep_a.detach(), q_rep_b.detach(), feats_idx)
+
+        return loss
+
 
 
 class ImageNetIndex(torch.utils.data.Dataset):
