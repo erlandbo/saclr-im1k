@@ -293,9 +293,9 @@ class SACLR1(nn.Module):
             s_inv_a = s_inv_a / torch.distributed.get_world_size()
             s_inv_b = s_inv_b / torch.distributed.get_world_size()
         else:
-            feats_idx = concat_all_gather(feats_idx)
-            s_inv_a = concat_all_gather(s_inv_a)
-            s_inv_b = concat_all_gather(s_inv_b)
+            feats_idx = concat_all_gather_no_grad(feats_idx)
+            s_inv_a = concat_all_gather_no_grad(s_inv_a)
+            s_inv_b = concat_all_gather_no_grad(s_inv_b)
 
         self.s_inv[feats_idx] = (s_inv_a + s_inv_b) / 2.0
 
@@ -372,9 +372,9 @@ class SACLRAll(nn.Module):
             s_inv_a = s_inv_a / torch.distributed.get_world_size()
             s_inv_b = s_inv_b / torch.distributed.get_world_size()
         else:
-            feats_idx = concat_all_gather(feats_idx)
-            s_inv_a = concat_all_gather(s_inv_a)
-            s_inv_b = concat_all_gather(s_inv_b)
+            feats_idx = concat_all_gather_no_grad(feats_idx)
+            s_inv_a = concat_all_gather_no_grad(s_inv_a)
+            s_inv_b = concat_all_gather_no_grad(s_inv_b)
 
         self.s_inv[feats_idx] = (s_inv_a + s_inv_b) / 2.0
 
@@ -386,8 +386,8 @@ class SACLRAll(nn.Module):
         feats_b = F.normalize(feats_b, dim=1, p=2)    
             
 
-        feats_a_large = torch.cat(all_gather_layer.apply(feats_a), 0)
-        feats_b_large = torch.cat(all_gather_layer.apply(feats_b), 0)
+        feats_a_large = gather(feats_a)  #torch.cat(all_gather_layer.apply(feats_a), 0)
+        feats_b_large = gather(feats_b) #torch.cat(all_gather_layer.apply(feats_b), 0)
         enlarged_B = feats_a_large.shape[0]
 
         replica_id = torch.distributed.get_rank()
@@ -481,9 +481,9 @@ class SACLRAllBatchMix(nn.Module):
             s_inv_a = s_inv_a / torch.distributed.get_world_size()
             s_inv_b = s_inv_b / torch.distributed.get_world_size()
         else:
-            feats_idx = concat_all_gather(feats_idx)
-            s_inv_a = concat_all_gather(s_inv_a)
-            s_inv_b = concat_all_gather(s_inv_b)
+            feats_idx = concat_all_gather_no_grad(feats_idx)
+            s_inv_a = concat_all_gather_no_grad(s_inv_a)
+            s_inv_b = concat_all_gather_no_grad(s_inv_b)
 
         self.s_inv[feats_idx] = (s_inv_a + s_inv_b) / 2.0
 
@@ -495,8 +495,8 @@ class SACLRAllBatchMix(nn.Module):
         feats_b = F.normalize(feats_b, dim=1, p=2)    
             
 
-        feats_a_large = torch.cat(all_gather_layer.apply(feats_a), 0)
-        feats_b_large = torch.cat(all_gather_layer.apply(feats_b), 0)
+        feats_a_large = gather(feats_a) #torch.cat(all_gather_layer.apply(feats_a), 0)
+        feats_b_large = gather(feats_b) #torch.cat(all_gather_layer.apply(feats_b), 0)
         enlarged_B = feats_a_large.shape[0]
 
         replica_id = torch.distributed.get_rank()
@@ -570,8 +570,8 @@ class SimCLR(nn.Module):
         hidden2 = F.normalize(hidden2, dim=1, p=2)
         
         # Gather hidden1/hidden2 across replicas and create local labels.
-        hidden1_large = torch.cat(all_gather_layer.apply(hidden1), dim=0)
-        hidden2_large = torch.cat(all_gather_layer.apply(hidden2), dim=0)
+        hidden1_large = gather(hidden1) #torch.cat(all_gather_layer.apply(hidden1), dim=0)
+        hidden2_large = gather(hidden2) #torch.cat(all_gather_layer.apply(hidden2), dim=0)
         enlarged_B = hidden1_large.shape[0]
 
         replica_id = torch.distributed.get_rank()
@@ -634,9 +634,9 @@ class SACLR1Cosine(nn.Module):
             s_inv_a = s_inv_a / torch.distributed.get_world_size()
             s_inv_b = s_inv_b / torch.distributed.get_world_size()
         else:
-            feats_idx = concat_all_gather(feats_idx)
-            s_inv_a = concat_all_gather(s_inv_a)
-            s_inv_b = concat_all_gather(s_inv_b)
+            feats_idx = concat_all_gather_no_grad(feats_idx)
+            s_inv_a = concat_all_gather_no_grad(s_inv_a)
+            s_inv_b = concat_all_gather_no_grad(s_inv_b)
 
         self.s_inv[feats_idx] = (s_inv_a + s_inv_b) / 2.0
 
@@ -713,9 +713,9 @@ class SACLRAllCosine(nn.Module):
             s_inv_a = s_inv_a / torch.distributed.get_world_size()
             s_inv_b = s_inv_b / torch.distributed.get_world_size()
         else:
-            feats_idx = concat_all_gather(feats_idx)
-            s_inv_a = concat_all_gather(s_inv_a)
-            s_inv_b = concat_all_gather(s_inv_b)
+            feats_idx = concat_all_gather_no_grad(feats_idx)
+            s_inv_a = concat_all_gather_no_grad(s_inv_a)
+            s_inv_b = concat_all_gather_no_grad(s_inv_b)
 
         self.s_inv[feats_idx] = (s_inv_a + s_inv_b) / 2.0
 
@@ -727,8 +727,8 @@ class SACLRAllCosine(nn.Module):
         feats_b = F.normalize(feats_b, dim=1, p=2)    
             
 
-        feats_a_large = torch.cat(all_gather_layer.apply(feats_a), 0)
-        feats_b_large = torch.cat(all_gather_layer.apply(feats_b), 0)
+        feats_a_large = gather(feats_a) #torch.cat(all_gather_layer.apply(feats_a), 0)
+        feats_b_large = gather(feats_b) #torch.cat(all_gather_layer.apply(feats_b), 0)
         enlarged_B = feats_a_large.shape[0]
 
         replica_id = torch.distributed.get_rank()
@@ -819,9 +819,9 @@ class SACLRAllBatchMixCosine(nn.Module):
             s_inv_a = s_inv_a / torch.distributed.get_world_size()
             s_inv_b = s_inv_b / torch.distributed.get_world_size()
         else:
-            feats_idx = concat_all_gather(feats_idx)
-            s_inv_a = concat_all_gather(s_inv_a)
-            s_inv_b = concat_all_gather(s_inv_b)
+            feats_idx = concat_all_gather_no_grad(feats_idx)
+            s_inv_a = concat_all_gather_no_grad(s_inv_a)
+            s_inv_b = concat_all_gather_no_grad(s_inv_b)
 
         self.s_inv[feats_idx] = (s_inv_a + s_inv_b) / 2.0
 
@@ -833,8 +833,8 @@ class SACLRAllBatchMixCosine(nn.Module):
         feats_b = F.normalize(feats_b, dim=1, p=2)    
             
 
-        feats_a_large = torch.cat(all_gather_layer.apply(feats_a), 0)
-        feats_b_large = torch.cat(all_gather_layer.apply(feats_b), 0)
+        feats_a_large = gather(feats_a) #torch.cat(all_gather_layer.apply(feats_a), 0)
+        feats_b_large = gather(feats_b) #torch.cat(all_gather_layer.apply(feats_b), 0)
         enlarged_B = feats_a_large.shape[0]
 
         replica_id = torch.distributed.get_rank()
@@ -1055,36 +1055,65 @@ class Transform:
         return y1, y2
 
 
-@torch.no_grad()
-def concat_all_gather(tensor):
+# https://github.com/vturrisi/solo-learn/blob/main/solo/utils/misc.py
+
+def get_rank():
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank()
+    return 0
+
+
+class GatherLayer(torch.autograd.Function):
     """
-    Performs all_gather operation on the provided tensors.
-    *** Warning ***: torch.distributed.all_gather has no gradient.
+    Gathers tensors from all process and supports backward propagation
+    for the gradients across processes.
     """
-    tensors_gather = [torch.ones_like(tensor)
-        for _ in range(torch.distributed.get_world_size())]
-    torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
-
-    output = torch.cat(tensors_gather, dim=0)
-    return output
-
-
-class all_gather_layer(torch.autograd.Function):
-    """Gather tensors from all process, supporting backward propagation."""
 
     @staticmethod
-    def forward(ctx, input):
-        ctx.save_for_backward(input)
-        output = [torch.zeros_like(input) for _ in range(torch.distributed.get_world_size())]
-        torch.distributed.all_gather(output, input)
+    def forward(ctx, x):
+        if dist.is_available() and dist.is_initialized():
+            output = [torch.zeros_like(x) for _ in range(dist.get_world_size())]
+            dist.all_gather(output, x)
+        else:
+            raise NotImplementedError("only multi gpu distributed supported")
+            output = [x]
         return tuple(output)
 
     @staticmethod
     def backward(ctx, *grads):
-        (input,) = ctx.saved_tensors
-        grad_out = torch.zeros_like(input)
-        grad_out[:] = grads[torch.distributed.get_rank()]
+        if dist.is_available() and dist.is_initialized():
+            all_gradients = torch.stack(grads)
+            dist.all_reduce(all_gradients)
+            grad_out = all_gradients[get_rank()]
+        else:
+            raise NotImplementedError("only multi gpu distributed supported")
+            grad_out = grads[0]
         return grad_out
+
+
+def gather(X, dim=0):
+    """Gathers tensors from all processes, supporting backward propagation."""
+    return torch.cat(GatherLayer.apply(X), dim=dim)
+
+
+@torch.no_grad()
+def concat_all_gather_no_grad(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Performs all_gather operation on the provided tensors.
+    *** Warning ***: torch.distributed.all_gather has no gradient.
+    """
+
+    if dist.is_available() and dist.is_initialized():
+        tensors_gather = [
+            torch.ones_like(tensor) for _ in range(torch.distributed.get_world_size())
+        ]
+        torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
+
+        output = torch.cat(tensors_gather, dim=0)
+        return output
+    else:
+        raise NotImplementedError("only multi gpu distributed supported")
+    return tensor
 
 
 
